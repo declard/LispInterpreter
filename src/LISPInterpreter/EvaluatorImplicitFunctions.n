@@ -1,0 +1,466 @@
+﻿using System;
+using System.Console;
+using SCG = System.Collections.Generic;
+
+using Nemerle.Assertions;
+using Nemerle.Text;
+using Nemerle.Utility;
+using Nemerle.Utility.NString;
+using StackInfo.DepthMonitor;
+namespace PureLISP {
+	public partial class Evaluator {
+		public static Contains(this p:Result,e:Result):bool {
+			match(p) {
+				| Pair(h,t) => if (Equals(h,e)) true else t.Contains(e)
+				| Nil() => false
+				| _ => Equals(p,e)
+			}
+		}
+		public setupSymbols():void {
+			def argsCountErr(n,c) {
+				Exception($"'$n' takes exactly $c argument(s)");
+			}
+			def defFunction(name,body) {
+				syms[name]=Symbol(Result.Lambda(Lambda.Imp(name,body)))
+			}
+			def defMacro(name,body) {
+				syms[name]=Symbol(Result.Macro(Lambda.Imp(name,body)))
+			}
+			def defSymbol(name,value) {
+				syms[name]=Symbol(value)
+			}
+			def boolToResult(b) {
+				if (b) Result.True() else Result.Nil()
+			}
+			/*def setSymbol(a:list[Result],t,m) {
+				match(a) {
+					| [Name(s),v] =>
+						t[s]=evalOp(v);
+						a.Head
+					| [Pair(Name("unquote"),Pair(Name(_) as n,Nil())),v] =>
+						def s=match(evalOp(n)) {
+							| Name(n) => n
+							| _ => throw Exception("In setSymbol: value can ne binded only to symbol")
+						}
+						t[s]=evalOp(v);
+						a.Head
+					| _ => throw argsCountErr(m)
+				}
+			}
+			def delSymbol(a:list[Result],t,m) {
+				match(a) {
+					| [Name(s)] =>
+						when (!t.ContainsKey(s)) throw Exception($"Symbol '$s' not found");
+						_=t.Remove(s);
+						a.Head
+					| _ => throw argsCountErr(m)
+				}
+			}*/
+			defMacro("def",fun(_:list[Result]) {
+				| [Name(n) as s,v] =>
+					context[n]=Symbol(null); // Дабы связываемая лямбда уже могла ссылаться на себя
+					context[n].value=evalOp(v);
+					s
+				| [Name(n) as s] => context[n]=Symbol(null); s
+				| _ => throw Exception("'def' takes 1 or 2 argument(s)")
+			});
+			defMacro("undef",fun(_:list[Result]) {
+				| [Name(n) as s] =>
+					if (context.ContainsKey(n))
+						_=context.Remove(n);
+					else throw Exception($"In 'undef': symbol '$n' is dot defined");
+					s
+				| _ => throw argsCountErr("undef",1)
+			});
+			defMacro("set",fun(_:list[Result]) {
+				| [Name(n) as s,v] =>
+					if(context.ContainsKey(n))
+						context[n].value=evalOp(v);
+					else throw Exception($"In 'set': symbol '$n' is dot defined");
+					s
+				| _ => throw argsCountErr("set",2)
+			});
+			def isSet(l:Result) {
+				| Pair(h,t) =>
+					if (t.Contains(h)) false else isSet(t)
+				| _ => true
+			}
+			def makeClosure(a,v) {
+				when (!isSet(a)) throw Exception("Some argument name is used more than once");
+				Lambda.Exp(a,v.ToPair(),SymTable(context))
+			}
+			defMacro("lambda",fun(_) {
+				| a::(_::_ as v) => Result.Lambda(makeClosure(a,v))
+				| _ => throw argsCountErr("lambda",2)
+			});
+			defMacro("macro",fun(_:list[Result]) {
+				| a::(_::_ as v) => Result.Macro(makeClosure(a,v))
+				| _ => throw argsCountErr("macro",2)
+			});
+			defMacro("if",fun(_:list[Result]) {
+				| [c,t,f] => if (Equals(evalOp(c),Result.True())) evalOp(t) else evalOp(f)
+				| [c,t] => if (Equals(evalOp(c),Result.True())) evalOp(t) else Result.Nil()
+				| _ => throw Exception("'if' takes 2 or 3 arguments")
+			});
+			defMacro("quote",fun(_:list[Result]) {
+				| [v] => v
+				| _ => throw argsCountErr("quote",1)
+			});
+			defMacro("backq",fun(_:list[Result]) {
+				| [v] =>
+					def walkDeeper(h,t) {
+						Result.Pair(walkExpr(h),walkExpr(t))
+					}
+					and walkExpr(_:Result) {
+						| Pair(Name(n) as h,Pair(e,Result.Nil()) as t) as p =>
+							match(n) {
+								| "unquote" => evalOp(e)
+								| "backq" | "quote" => p
+								| _ => walkDeeper(h,t)
+							}
+						| Pair(h,t) => walkDeeper(h,t)
+						| x => x
+					}
+					walkExpr(v)
+				| _ => throw argsCountErr("backq",1)
+			});
+			defFunction("error",fun(l:list[Result]) {
+				def exc=l.Map(_.ToString()).FoldRight("",fun(x:String,y:String) { $"$x $y" });
+				throw Exception("Error: "+exc)
+			});
+			defMacro("expandMacro",fun(_:list[Result]) {
+				| [Pair(f,argso)] =>
+					match(evalOp(f)) {
+						| Macro(Exp(argss,op,closure)) =>
+							evalWithContext(argss,argso,op,closure)
+						| _ => throw Exception("In 'expandMacro': it wroks only for explicit macros")
+					}
+				| _ => throw argsCountErr("expandMacro",1)
+			});
+			
+			defFunction("list",_.ToPair());
+			defFunction("car",fun(_:list[Result]) {
+				| [Pair(h,_)] => h
+				| [_] => Result.Nil()
+				| _ => throw argsCountErr("car",1)
+			});
+			defFunction("cdr",fun(_:list[Result]) {
+				| [Pair(_,t)] => t
+				| [_] => Result.Nil()
+				| _ => throw argsCountErr("car",1)
+			});
+			defFunction("+",fun(l:list[Result]) {
+				Result.Number(l.FoldLeft(0,fun(x:Result,y:int) {
+					| (Number(l),r) => l+r
+					| _ => throw Exception("'*' works only for numbers")
+				}))
+			});
+			defFunction("-",fun(_:list[Result]) {
+				| [Number(l),Number(r)] => Result.Number(l-r)
+				| [Number(l)] => Result.Number(-l)
+				| _ => throw Exception("'-' takes 1 or 2 argument(s)")
+			});
+			defFunction("*",fun(l:list[Result]) {
+				Result.Number(l.FoldLeft(1,fun(x:Result,y:int) {
+					| (Number(l),r) => l*r
+					| _ => throw Exception("'*' works only for numbers")
+				}))
+			});
+			defFunction("/",fun(_:list[Result]) {
+				| [Number(l),Number(r)] => Result.Number(l/r)
+				| _ => throw argsCountErr("/",2)
+			});
+			defFunction("%",fun(_:list[Result]) {
+				| [Number(l),Number(r)] => Result.Number(l%r)
+				| _ => throw argsCountErr("%",2)
+			});
+			defFunction("=",fun(_:list[Result]) {
+				| [l,r] => boolToResult(Equals(l,r))
+				| _ => throw argsCountErr("=",2)
+			});
+			defFunction(">",fun(_:list[Result]) {
+				| [Number(l),Number(r)] => boolToResult(l>r)
+				| _ => throw argsCountErr(">",2)
+			});
+			defFunction("<",fun(_:list[Result]) {
+				| [Number(l),Number(r)] => boolToResult(l<r)
+				| _ => throw argsCountErr("<",2)
+			});
+			defFunction("xor",fun(_:list[Result]) {
+				| [True(),True()] | [Nil(),Nil()] => Result.Nil()
+				| [True(),Nil()] | [Nil(),True()] => Result.True()
+				| _ => throw argsCountErr("xor",2)
+			});
+			defFunction("cons",fun(_:list[Result]) {
+				| [l,r] => Result.Pair(l,r)
+				| _ => throw argsCountErr("cons",2)
+			});
+			defFunction("concat",fun(_:list[Result]) {
+				| [String(l),String(r)] => Result.String(l+r)
+				| _ => throw argsCountErr("concat",2)
+			});
+			defFunction("apply",fun(_:list[Result]) {
+				| [Lambda(_) as l,a] | [Macro(_) as l,a] => evalCall(l,a.MapPair(
+					x => [Result.Name("quote"),x].ToPair()
+				))
+				| [_,_] => throw Exception("First argument must be callable")
+				| _ => throw argsCountErr("apply",2)
+			});
+			defFunction("names",fun(_:list[Result]) {
+				| [] => Nemerle.Collections.NList.ToList(syms).
+					Map(x=>Result.Name(x.Key)).ToPair()
+				| _ => throw argsCountErr("names",0)
+			});
+			defFunction("typeof",fun(a:list[Result]) {
+				match(a) {
+					| [a]=>
+						Result.Name(match(a) {
+							| String(_) => "string"
+							| Number(_) => "number"
+							| Pair(_,_) | Nil() => "list"
+							| True() => "true"
+							| Lambda() => "lambda"
+							| Macro() => "macro"
+							| Name(_) => "name"
+						})
+					| _ => throw argsCountErr("typeof",1)
+				}
+			});
+			defFunction("eval",fun(_:list[Result]) {
+				| [x] => evalOp(x)
+				| _ => throw argsCountErr("eval",1)
+			});
+			defFunction("write",fun(_:list[Result]) {
+				| [x] => Write(x); Result.Nil()
+				| _ => throw argsCountErr("write",1)
+			});
+			defSymbol("lf",Result.String("\n"));
+			defFunction("setTypePrinting",fun(_:list[Result]) {
+				| [True(),x] => x.printType=true; x
+				| [Nil(),x] => x.printType=false; x
+				| _ => throw argsCountErr("setTypePrinting",2)
+			});
+			defFunction("getContext",fun(_:list[Result]) {
+				| [] =>
+					mutable l=[];
+					foreach(c in context)
+						l::=Result.Pair(Result.Name(c.Key),c.Value.value);
+					l.ToPair()
+				| _ => throw argsCountErr("getContext",0)
+			});
+			defFunction("setContext",fun(_:list[Result]) {
+				| [x] =>
+					context.Clear();
+					x.ToList().Iter(fun(_:Result){
+						| Pair(Name(n),v) => context[n]=Symbol(v)
+						| _ => throw Exception("In 'setContext': incorrect context format")
+					});
+					Result.Nil()
+				| _ => throw argsCountErr("setContext",1)
+			});
+			defFunction("parse",fun(_:list[Result]) {
+				| [String(s)] =>
+					Parser(Lexer(s)).getList().Map(makeOp).ToPair()
+				| _ => throw argsCountErr("parse",1)
+			});
+			defFunction("null?",fun(_:list[Result]) {
+				| [Nil()] => Result.True()
+				| [_] => Result.Nil()
+				| _ => throw argsCountErr("null?",1)
+			});
+			defFunction("pair?",fun(_:list[Result]) {
+				| [Pair(_,_)] => Result.True()
+				| [_] => Result.Nil()
+				| _ => throw argsCountErr("null?",1)
+			});
+			defFunction("exit",fun(_:list[Result]) {
+				| [] => Environment.Exit(0); Result.Nil()
+				| [Number(n)] => Environment.Exit(n); Result.Nil()
+				| _ => throw Exception("'exit' takes 0 or 1 argument(s)")
+			});
+			defMacro("set?",fun(_:list[Result]) {
+				| [Name(n)] =>
+					if(context.ContainsKey(n))
+						boolToResult(context[n].value!=null)
+					else throw Exception($"In 'set?': symbol '$n' is dot defined");
+				| _ => throw argsCountErr("set?",1)
+			});
+			defSymbol("t",Result.True());
+			defSymbol("nil",Result.Nil());
+			
+			ignore(this.eval(<#
+				(def defun (macro (a . b) `(def ~a (lambda . ~b))))
+				(def demac (macro (a . b) `(def ~a (macro . ~b))))
+				(def setf (macro (a . b) `(set ~a (lambda . ~b))))
+				(def setm (macro (a . b) `(set ~a (macro . ~b))))
+				
+				(defun unqote (x) x)
+				(defun compose(f g)(lambda x (f (apply g x))))
+				(def caar (compose car car))
+				(def cadr (compose car cdr))
+				(def cdar (compose cdr car))
+				(def cddr (compose cdr cdr))
+				(def append (lambda X
+					(defun appendsub(x y)(if (null? x) y (cons (car x) (append (cdr x) y))))
+					(if (null? X) nil (appendsub (car X) (apply append (cdr X))))))
+				(defun curry (f . a) (if
+					(null? a)
+					nil
+					(lambda y (apply f (append a y)))))
+				
+				(def foldRight)
+				(def ++ (curry + 1))
+				(def -- (lambda(x)(- x 1)))
+				(defun not(x)(if x nil t))
+				(def <= (compose not >))
+				(def >= (compose not <))
+				(def != (compose not =))
+				(def ! not)
+				(demac or x (foldRight (lambda(y z)`(if ~y t ~z)) nil x))
+				(demac and x (foldRight (lambda(y z)`(if ~y ~z nil)) t x))
+				(def || or)
+				(def && and)
+				
+				(demac comment _ nil)
+				(defun nop x x)
+				(defun quoteqoute(x) (cons 'quote x))
+				
+				(defun writeline (x) (write x)(write lf))
+				
+				(defun isTypeOf(t v)(= (typeof v) t))
+				(def number? (curry isTypeOf 'number))
+				(def string? (curry isTypeOf 'string))
+				(def name? (curry isTypeOf 'name))
+				(def list? (curry isTypeOf 'list))
+				(def lambda? (curry isTypeOf 'lambda))
+				(def macro? (curry isTypeOf 'macro))
+				(def true? (curry isTypeOf 'true))
+				(def atom? (compose ! list?))
+				(def zero? (curry = 0))
+
+				(def cond)
+				(defun length(x)(if (null? x) 0 (++ (length (cdr x)))))
+				(defun map(f l)
+					(if (null? l)
+						nil
+						(if (atom? l)
+							(f l)
+							(cons (f (car l)) (map f (cdr l))))))
+				(defun mapArgs(f . l)(map f l))
+				(defun foldLeft(f a l)
+					(if (null? l)
+						a
+						(if (atom? l)
+							(f l a)
+							(foldLeft f (f (car l) a) (cdr l)))))
+				(setf foldRight(f a l)
+					(if (null? l)
+						a
+						(if (atom? l)
+							(f l a)
+							(f (car l) (foldRight f a (cdr l))))))
+				(defun exists(f l)(cond ((null? l) nil) ((atom? l) (f l)) ((f (car l)) t) (t (exists f (cdr l)) ) ))
+				(defun every(f l)(cond ((null? l) t) ((atom? l) (f l)) ((f (car l)) (every f (cdr l))) (t nil)))
+				(defun pmap (f . l)
+					(let
+						((mmapsub (lambda (y z)
+							(let
+								((cas (map car z))
+								(cds (map cdr z)))
+								(if (exists null? z) nil (if (exists atom? z) (apply y z) (cons (apply y cas) (mmapsub y cds))))))))
+						(mmapsub f l)))
+				(defun reduce(x y)
+					(if (null? y) nil (foldLeft x (car y) (cdr y))))
+				(defun fold(f l)
+					(if (null? l) nil (cons (f (car l)) (fold f (cdr l)))))
+				(defun unfold(s g e)(if (e s) nil (cons s (unfold (g s) g e))))
+				(defun nth(n l) (if (null? l)
+					(error `(In "nth": index ~n is out of range))
+					(if (> n 0) (nth (-- n) (cdr l)) (car l))))
+				(defun find(f l)(cond ((null? l) nil) ((f (car l))(car l)) (t (find f (cdr l)))))
+				(defun filter(f l)(cond
+					((null? l) nil)
+					((atom? l) (if (f l) l nil))
+					((f (car l)) (cons (car l) (filter f (cdr l))))
+					(t (filter f (cdr l)))))
+				(defun pairToList(x)(cond
+					((null? x) nil)
+					((atom? x) (cons x nil))
+					(t (cons (car x) (pairToList (cdr x))))))
+				(defun reverse(x)(let
+					((reverseSub(x y)(if (null? x) y (reverseSub (cdr x) (cons (car x) y)))))
+					(reverseSub x ())))
+				
+				(setm cond x (foldRight (lambda(y z)`(if ~(car y) ((lambda . (() . ~(cdr y)))) ~z)) nil x))
+				(demac let (d . b) `(
+					~(append
+						`(lambda ())
+						(map
+							(lambda(x)
+								(def l (length x))
+								(cond
+									((or (= l 1) (= l 2)) (cons `def x))
+									((= l 3) (cons `defun x))
+									(t (error `(In "let": macro accepts only 1, 2 or 3 arguments in definitions section (got ~l))))))
+							d)
+						b)))
+				(demac letrec (d . b) `(
+					~(append
+						`(lambda ())
+						(map
+							(lambda(x)(list `def (car x)))
+							d)
+						(map
+							(lambda(x)
+								(def l (length x))
+								(cond
+									((= l 2) (cons `set x))
+									((= l 3) (cons `setf x))
+									((!= l 1) (error `(In "letrec": macro accepts only 1, 2 or 3 arguments in definitions section (got ~l))))))
+							d)
+						b)))
+				
+				(demac match (C S . V)
+					(if (or (null? S) (null? V) (exists (compose not name?) C))
+						(error Target and variant must not be empty, closure list must contain only names)
+						(let
+							((patternsChecker(E)(let
+								((unify (s te)(cond
+									((and (list? te) (exists (curry = (car te)) `(quote backq))) (list (= s (cadr te))))
+									((name? te) (cond
+										((exists (curry = te) C) (list (= s (E te))))
+										((= te `_) (list t))
+										(t (list t (cons te s)))))
+									((= (typeof s) (typeof te)) (cond
+										((list? te) (let
+											((unifyAll (s te)(cond
+												((null? te) (list (null? s)))
+												((atom? te) (unify s te))
+												((or (atom? s) (null? s)) (list nil))
+												(t (let
+													((cau (unify (car s) (car te)))
+													(cdu (unifyAll (cdr s) (cdr te))))
+													(cons
+														(and (car cau) (car cdu))
+														(filter (compose not null?) (append (cdr cau) (cdr cdu)))))))))
+											(unifyAll s te)))
+										(t (list (= s te)))))
+									(t (list nil nil))))
+								(checkPatterns (s p) (if (null? p) nop (let
+									((h (car p)) (r (unify s (car h))))
+									(if (car r)
+										`(let ~(map (lambda(x)`(~(car x) ~(quoteqoute (cdr x)))) (cdr r)) ~(cadr h))
+										(checkPatterns s (cdr p)))))))
+								checkPatterns)))
+							`(eval ((~patternsChecker (lambda (n)
+										~(cons
+											`cond
+											(map (lambda(x)`((= n ~(list `quote x)) ~x)) C))))
+								~S
+								~(quoteqoute V))))))
+							
+							
+			#>));
+		}
+	}
+}

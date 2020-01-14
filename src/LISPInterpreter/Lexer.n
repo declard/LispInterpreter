@@ -1,0 +1,94 @@
+﻿using System;
+using SCG = System.Collections.Generic;
+
+using Nemerle.Assertions;
+using Nemerle.Utility;
+
+namespace PureLISP {
+	public class Lexer {
+		str="";
+		mutable position=0;
+		public this(s:string) { str=s }
+		public variant Token {
+			| None
+			| LParen
+			| RParen
+			| Name { val:string; }
+			| String { val:string; }
+			| Number { val:int; }
+			| Quote
+			| Backq
+			| Unquote
+			| Dot
+			
+			public override ToString():string {
+				match(this) {
+					| None() => "None()"
+					| LParen() => "LParen()"
+					| RParen() => "RParen()"
+					| Name(n) => $"Name($n)"
+					| String(s) => $"String($s)"
+					| Number(i) => $"Number($i)"
+					| Quote() => "Quote()"
+					| Backq() => "Backq()"
+					| Unquote() => "Unquote()"
+					| Dot() => "Dot()"
+				}
+			}
+		}
+		public getToken():Token {
+			def matrix=array.[2][
+			//		' '	term'"'	_
+		/*1*/	[	1,	2,	4,	3	],	// ' ', void
+		/*2*/	[	0,	0,	0,	0	],	// '(',')','\'','`','~','.'
+		/*3*/	[	0,	0,	0,	3	],	// any
+		/*4*/	[	5,	5,	6,	5	],	// opening quote
+		/*5*/	[	5,	5,	6,	5	],	// between quotes
+		/*6*/	[	0,	0,	0,	0	]	// enclosing quote
+			];
+			mutable y=1;
+			mutable lastY=1;
+			def scan(s,l) {
+				lastY=y;
+				if (position>=str.Length) (s,l)
+				else {
+					def x=match(str[position]) {
+						| ' ' | '\n' | '\t' | '\r' => 0
+						| '(' | ')' | '\'' | '`' | '~' | '.' => 1
+						| '"' => 2
+						| _ => 3
+					}
+					y=matrix[y-1,x];
+					position++;
+					match(y) {
+						| 0 => position--; (s,l)
+						| 1 | 4 => scan(s+1,0)
+						| 2 | 3 | 5 => scan(s,l+1)
+						| 6 => scan(s,l)
+						| _ => (s,l)
+					}
+				}
+			}
+			def (s,l)=scan(position,0);
+			def sub=str.Substring(s,l);
+			match(lastY) {
+				| 2 =>
+					match(sub[0]) {
+						| '\'' => Token.Quote()
+						| '`' => Token.Backq()
+						| '~' => Token.Unquote()
+						| '(' => Token.LParen()
+						| ')' => Token.RParen()
+						| '.' => Token.Dot()
+						| _ => Token.None()
+					}
+				| 3 =>
+					try {
+						Token.Number(Convert.ToInt32(sub))
+					} catch { _ => Token.Name(sub) }
+				| 6 => Token.String(sub)
+				| _ => Token.None()
+			}
+		}
+	}
+}

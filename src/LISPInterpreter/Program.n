@@ -1,0 +1,98 @@
+﻿using System;
+using System.Console;
+using SCG = System.Collections.Generic;
+
+using Nemerle.Assertions;
+using Nemerle.Text;
+using Nemerle.Utility;
+using Nemerle.Utility.NString;
+using StackInfo.DepthMonitor;
+
+namespace PureLISP {
+	module Program {
+        Main() : void {
+        	def ev=Evaluator();
+        	try {
+        		ev.setupSymbols();
+				def loop() {
+				/*def r=ev.eval(<#
+					(demac class (n . e)
+						`(defun ~n ~(map cadr (filter (compose (curry > 4) length) e))
+							(letrec
+								~(map cdr (filter (compose (curry < 3) length) e))
+								(macro x
+									(if
+										(not (and
+											(name? x)
+											(exists
+												(curry = x)
+												~(list 'quote (map 
+													cadr
+													(filter (compose (curry = `public) car) e))))))
+										(error `(Field or method ~x is unaccessable))
+										x)))))
+
+					(class myClass
+						(private myField)
+						(public setField(x) (set myField x))
+						(public getField () myField))
+
+					(def obj (myClass 2))
+					((obj.getField))
+					((obj.setField) 3)
+					((obj.getField))
+				#>);
+				WriteLine(r);*/
+					try { WriteLine(ev.eval(ReadLine())) }
+					catch { e => WriteLine(e.Message) }
+					loop();
+				}
+				loop();
+			} catch { | e =>
+				WriteLine(e.Message);
+				ev.CallStack.Iter(fun(s) {WriteLine(s); WriteLine(); });
+			}
+            _ = ReadKey(true);
+        }
+    }
+}
+/*
+
+*/
+/*
+					(map
+						(lambda(x)(match (t) x ((x _ z) (list z x)) ((q . z) (apply q z)) ((3 x 1) x) (_ "No matches found")))
+						`( (~+ 5 1 1))
+					)
+					(let ((secret-message "none"))
+						(list
+							(set foo (lambda (msg) (set secret-message msg)))
+							(set bar (lambda () secret-message))
+						)
+					)
+					secret-message
+					(bar)
+					(foo "test")
+					(bar)
+*/
+/* Y-combinator
+
+					(defun Y (f)
+						(let
+							((fu (future)
+								(f (lambda (arg) 
+									((future future) arg)))))
+							(fu fu)))
+
+					((Y (lambda (factorial)
+						(lambda (n)
+							(if (= n 0)
+								1
+								(* n (factorial (- n 1)))))))
+						10)
+*/
+/*
+(defun positive(x) (filter (curry < 0) x))
+
+(defun makeSet(x) (if x (let ((h (car x)) (t (cdr x))) (cons h (makeSet (filter (curry != h) t))))))
+*/

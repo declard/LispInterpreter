@@ -1,0 +1,231 @@
+﻿using System;
+using System.Console;
+using SCG = System.Collections.Generic;
+
+using Nemerle.Assertions;
+using Nemerle.Text;
+using Nemerle.Utility;
+using Nemerle.Utility.NString;
+using StackInfo.DepthMonitor;
+namespace PureLISP {
+	public partial class Evaluator {
+		criticalDepth:uint; // Критическая глубина стека (для предотвращения падения программы от StackOverflowException)
+		type ImplicitLambda=list[Result]->Result;
+		[Record()]
+		class Symbol {
+			public mutable value:Result;
+		}
+		type SymTable=SCG.Dictionary[string,Symbol];
+		mutable syms:SymTable=SymTable(); // Область глобальных символов
+		mutable context:SymTable=syms; // Символы в текущей функции
+		
+		mutable callStack:list[string]=[]; // Отладочный стек вызовов
+		
+		variant Lambda {
+			| Exp {
+				args:Result; // Аргументы
+				ops:Result; // Структура программы
+				context:SymTable; // Контекст замыкания
+			}
+			| Imp {
+				name:string;
+				func:ImplicitLambda;
+			} // Встроенная функция
+		}
+		
+		public variant Result {
+			| String { val:string; }
+			| Number { val:int; }
+			| Pair {
+				head:Result;
+				tail:Result;
+			}
+			| Nil
+			| True
+			| Lambda { lambda:Evaluator.Lambda; }
+			| Macro { lambda:Evaluator.Lambda; }
+			| Name { name:string; }
+			
+			public mutable printType=false;
+			
+			public override ToString():string {
+				def gt(s) {
+					if (printType) ":"+s else "";
+				}
+				def constructLambda(t,a,o) {
+					mutable value=(Result.Pair(Result.Name(t),Result.Pair(a,o)));
+					value.printType=false;
+					$<#$value$(gt("callable"))#>
+				}
+				match(this) {
+					| String(s) => $<#"$s"#> + gt("string")
+					| Number(i) => $"$i"+gt("int")
+					| Pair(_,_) as p =>
+						def print(p:Result,acc) {
+							match(p) {
+								| Pair(x,Result.Nil()) => "("+acc.FoldLeft($"$x",(x,y) => $"$x $y")+")"
+								| Pair(x,xs) => print(xs,x::acc)
+								| x => "("+acc.FoldLeft($". $x",(x,y) => $"$x $y")+")"
+							}
+						}
+						print(p,[])+gt("list")
+					| Nil() => "()"+gt("list")
+					| True() => "#t"+gt("true")
+					| Lambda(Lambda.Exp(a,o,_)) => constructLambda("lambda",a,o)
+					| Macro(Lambda.Exp(a,o,_)) => constructLambda("macro",a,o)
+					| Lambda(Lambda.Imp(n,_)) => $"IMPLICIT_LAMBDA($n)"+gt("callable")
+					| Macro(Lambda.Imp(n,_)) => $"IMPLICIT_MACRO($n)"+gt("callable")
+					| Name(n) => $"$n"+gt("name")
+				}
+			}
+			
+			public override Equals(o:object):bool {
+				if (o is Result) match((this,o:>Result)) {
+					| (String(s),String(s')) => s==s'
+					| (Number(i),Number(i')) => i==i'
+					| (Pair(h,t),Pair(h',t')) => Equals(h,h') && Equals(t,t')
+					| (Nil(),Nil())  => true
+					| (True(),True()) => true
+					| (Lambda(l),Lambda(l')) => ReferenceEquals(l,l')
+					| (Macro(m),Macro(m')) => ReferenceEquals(m,m')
+					| (Name(n),Name(n')) => n==n'
+					| (Number(i),String(s)) | (String(s),Number(i)) => i.ToString()==s
+					| (Number(i),True()) | (True(),Number(i)) => i!=0
+					| (String(s),True()) | (True(),String(s)) => s.Length!=0
+					| (True(),Nil()) | (Nil(),True()) => false
+					| (True(),_) | (_,True()) => true
+					| _ => false
+				}
+				else match((this,o)) {
+					| (String(s),s') when s' is System.String => s==s'
+					| (Number(i),i') when i' is System.Int32 => Equals(i,i')
+					| (Nil(),[]) => true
+					| (Pair(_,_),_::_ as o) => Equals(o.ToPair())
+					| _ => false
+				}
+			}
+		}
+		
+		public this(depth:uint=100000) {
+			criticalDepth=depth;
+			//setupSymbols(); // См. EvaluatorImplicitFunctions.n
+		}
+		
+		static public ToPair(this _:list[Result]):Result {
+			| h::t => Result.Pair(h,t.ToPair())
+			| [] => Result.Nil()
+		}
+		
+		static public ToList(this _:Result):list[Result] {
+			| Nil() => []
+			| Pair(h,t) => h::t.ToList()
+			| _ => throw Exception ("ToList accepts only Pair()s, valid as lists")
+		}
+		
+		static public MapPair(this p:Result,f:Result->Result):Result {
+			match(p) {
+				| Nil() => p
+				| Pair(h,t) => Result.Pair(f(h),MapPair(t,f))
+				| x => f(x)
+			}
+		}
+		probeStack():void {
+			when (BytesRemain()<criticalDepth) throw Exception("Stack overflow");
+		}
+		makeOp(_:Parser.AST):Result {
+			| None() => Result.Nil()
+			| String(s) => Result.String(s)
+			| Number(i) => Result.Number(i)
+			| Name(n) => Result.Name(n)
+			| Pair(_,_) as p =>
+				def convertPair(p:Parser.AST) {
+					| Pair(l,r) => Result.Pair(makeOp(l),convertPair(r))
+					| x => makeOp(x)
+				}
+				convertPair(p)
+		}
+		evalOp(_:Result):Result {
+			| Name(n) =>
+				if (context.ContainsKey(n)) {
+					def v=context[n].value;
+					when (v==null) throw Exception($"Symbol '$n' is defined, but not bound to any value");
+					v
+				}
+				else throw Exception($"Symbol '$n' not found")
+			| Pair(h,t) =>
+				probeStack();
+				callStack::= $"[$h] on $t";
+				def r=evalCall(evalOp(h),t);
+				callStack=callStack.Tail;
+				r
+			| x => x
+		}
+		evalCall(func:Result,argso:Result):Result {
+			match(func) {
+				| Lambda(c) =>
+					def argsv=argso.MapPair(evalOp);
+					match(c) {
+						| Imp(_,f) =>
+							probeStack();
+							f(argsv.ToList())
+						| Exp(argss,op,closure) => evalWithContext(argss,argsv,op,closure)
+					}
+				| Macro(Imp(_,f)) =>
+					probeStack();
+					f(argso.ToList())
+				| Macro(Exp(argss,op,closure)) =>
+					evalOp(evalWithContext(argss,argso,op,closure))
+				| _ => throw Exception("Only lambda or macro can be called")
+			}
+		}
+		evalWithContext(argss:Result,argsv:Result,op:Result,closure:SymTable):Result {
+			probeStack();
+			def lastContext=context;
+			context=closure;
+			try {
+				def setContext(_:Result*Result) {
+					| (Pair(Name(n),ts),Pair(v,tv)) =>
+						context[n]=Symbol(v);
+						setContext(ts,tv);
+					| (Nil(),Nil()) => ()
+					| (Name(n),v) => context[n]=Symbol(v);
+					| (Pair(Name(_),_),_) => throw Exception("Trying to call list-by-elements taking lambda on non-list")
+					| _ => throw Exception("Only names and empty list are allowed as arguments")
+				}
+				setContext(argss,argsv);
+				def evalOps(_:Result) {
+					| Pair(l,Nil()) => evalOp(l)
+					| Pair(l,r) =>
+						ignore(evalOp(l));
+						evalOps(r)
+					| x => evalOp(x)
+				}
+				evalOps(op);
+			}
+			finally {
+				context=lastContext;
+			}
+
+		}
+		
+		public eval(s:string):list[Result] {
+			Parser(Lexer(s)).getList().Map(eval)
+		}
+		public eval(ast:Parser.AST):Result {
+			evalOp(makeOp(ast))
+		}
+		public static eval(s:string,depth:uint=10000):list[Result] {
+			def e=Evaluator(depth);
+			e.eval(s)
+		}
+		
+		public CallStack:list[string] {
+			get { callStack }
+		}
+		public reset():void {
+			syms=SymTable();
+			context=syms;
+			callStack=[];
+		}
+	}
+}

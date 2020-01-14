@@ -1,0 +1,71 @@
+﻿using System;
+using SCG = System.Collections.Generic;
+
+using Nemerle.Assertions;
+using Nemerle.Utility;
+
+namespace PureLISP {
+	public class Parser {
+		lexer:Lexer;
+		public this(l:Lexer) { lexer=l }
+		public variant AST {
+			| None
+			| String { val:string; }
+			| Number { val:int; }
+			| Name { val:string; }
+			| Pair { left:AST; right:AST; }
+			
+			public override ToString():string {
+				match(this) {
+					| None() => "None"
+					| String(s) => $"String($s)"
+					| Number(i) => $"Number($i)"
+					| Pair(_,_) as p =>
+						def print(p:AST,acc) {
+							match(p) {
+								| Pair(x,AST.None()) => "("+acc.FoldLeft($"$x",(x,y) => $"$x $y")+")"
+								| Pair(x,xs) => print(xs,x::acc)
+								| x => "("+acc.FoldLeft($". $x",(x,y) => $"$x $y")+")"
+							}
+						}
+						print(p,[])
+					| Name(n) => $"Name($n)"
+				}
+			}
+		}
+		
+		public getList():list[AST] {
+			def getPair(_:Lexer.Token) {
+				| None() => throw Exception("Unmatched paren");
+				| RParen() => AST.None()
+				| Dot() =>
+					def r=getExpr(lexer.getToken());
+					match(lexer.getToken()) {
+						| RParen() => ()
+						| t => throw Exception($"Value after '.' must be the last in the list (got '$t' instead of ')')")
+					};
+					r
+				| t => AST.Pair(getExpr(t),getPair(lexer.getToken()))
+			}
+			and getExpr(_:Lexer.Token) {
+				| None() => AST.None()
+				| Number(i) => AST.Number(i)
+				| String(s) => AST.String(s)
+				| Name(s) => AST.Name(s)
+				| LParen() => getPair(lexer.getToken())
+				| Quote() => decorateNextExpr("quote")
+				| Backq() => decorateNextExpr("backq")
+				| Unquote() => decorateNextExpr("unquote")
+				| t => throw Exception($"Unexpected token: $t")
+			}
+			and decorateNextExpr(n) {
+				AST.Pair(AST.Name(n),AST.Pair(getExpr(lexer.getToken()),AST.None()))
+			}
+			def getExprs(_:Lexer.Token) {
+				| None() => []
+				| t => getExpr(t)::getExprs(lexer.getToken())
+			}
+			getExprs(lexer.getToken())
+		}
+	}
+}
